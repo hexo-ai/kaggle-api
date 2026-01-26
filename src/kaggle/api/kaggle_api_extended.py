@@ -3168,14 +3168,15 @@ class KaggleApi:
                     else:
                         print("Using kernel " + kernel)
 
-        if "/" in kernel:
-            self.validate_kernel_string(kernel)
-            kernel_url_list = kernel.split("/")
-            owner_slug = kernel_url_list[0]
-            kernel_slug = kernel_url_list[1]
-        else:
-            owner_slug = self.get_config_value(self.CONFIG_NAME_USER)
-            kernel_slug = kernel
+        # Parse kernel string, extracting version if provided in slug format (owner/slug/version)
+        owner_slug, kernel_slug, slug_version = self.split_kernel_string(kernel)
+
+        # Version from slug overrides version_number if not explicitly set
+        if slug_version is not None and version_number is None:
+            version_number = slug_version
+
+        # Rebuild kernel string without version for API calls
+        kernel_ref = f"{owner_slug}/{kernel_slug}"
 
         if path is None:
             effective_path = self.get_default_download_dir("kernels", owner_slug, kernel_slug)
@@ -3184,7 +3185,7 @@ class KaggleApi:
 
         # If version_number is provided, map it to script_version_id
         if version_number:
-            versions = self.kernels_versions(kernel)
+            versions = self.kernels_versions(kernel_ref)
             matching = [v for v in versions if v["version_number"] == version_number]
             if not matching:
                 max_v = max(v["version_number"] for v in versions) if versions else 0
@@ -3484,6 +3485,10 @@ class KaggleApi:
         for item in versions_data[0].get("items", []):
             ver = item.get("version", {})
             run = item.get("run", {})
+            submission = item.get("submission", {})
+            # Try to extract scores from submission or run objects
+            public_score = submission.get("publicScore") or run.get("publicScore")
+            private_score = submission.get("privateScore") or run.get("privateScore")
             result.append(
                 {
                     "version_number": ver.get("versionNumber"),
@@ -3491,6 +3496,8 @@ class KaggleApi:
                     "rendered_url": run.get("renderedOutputUrl"),
                     "status": run.get("status"),
                     "date_created": run.get("dateCreated"),
+                    "public_score": public_score,
+                    "private_score": private_score,
                 }
             )
 
@@ -3509,21 +3516,42 @@ class KaggleApi:
         owner_slug, kernel_slug = kernel.split("/")
         return self._fetch_kernel_versions(owner_slug, kernel_slug)
 
-    def kernels_versions_cli(self, kernel, kernel_opt=None):
+    def kernels_versions_cli(self, kernel, kernel_opt=None, csv_display=False):
         """CLI wrapper for kernels_versions.
 
         Args:
             kernel: The kernel identifier.
             kernel_opt: Alternative kernel identifier from -k flag.
+            csv_display: If True, print comma-separated values instead of a table.
         """
         kernel = kernel or kernel_opt
         versions = self.kernels_versions(kernel)
 
-        print(f"{'Version':<10} {'scriptVersionId':<15} {'Status':<10}")
-        print("-" * 40)
-        for v in versions:
-            status = v.get("status", "N/A")
-            print(f"{v['version_number']:<10} {v['script_version_id']:<15} {status:<10}")
+        if csv_display:
+            fields = ["version_number", "script_version_id", "date_created", "public_score", "private_score", "status"]
+            self.print_csv(versions, fields)
+        else:
+            # Determine which columns to show (hide score columns if no scores available)
+            has_scores = any(v.get("public_score") or v.get("private_score") for v in versions)
+            if has_scores:
+                print(f"{'Version':<10} {'Date':<12} {'PublicScore':<14} {'PrivateScore':<14} {'Status':<12}")
+                print("-" * 70)
+                for v in versions:
+                    version_num = v.get("version_number", "N/A")
+                    date = v.get("date_created", "N/A")[:10] if v.get("date_created") else "N/A"
+                    public_score = v.get("public_score") or "-"
+                    private_score = v.get("private_score") or "-"
+                    status = v.get("status", "N/A")
+                    print(f"{version_num:<10} {date:<12} {public_score:<14} {private_score:<14} {status:<12}")
+            else:
+                print(f"{'Version':<10} {'scriptVersionId':<18} {'Date':<12} {'Status':<12}")
+                print("-" * 55)
+                for v in versions:
+                    version_num = v.get("version_number", "N/A")
+                    script_id = v.get("script_version_id", "N/A")
+                    date = v.get("date_created", "N/A")[:10] if v.get("date_created") else "N/A"
+                    status = v.get("status", "N/A")
+                    print(f"{version_num:<10} {script_id:<18} {date:<12} {status:<12}")
 
     def kernels_output(self, kernel: str, path: str, force: bool = False, quiet: bool = True) -> Tuple[List[str], str]:
         """Retrieves the output for a specified kernel.
@@ -5338,13 +5366,15 @@ class KaggleApi:
             except:
                 raise ValueError("Model instance version's version-number must be an integer")
 
-    def validate_kernel_string(self, kernel: Optional[str]) -> None:
+    def validate_kernel_string(self, kernel: Optional[str], allow_version: bool = False) -> None:
         """Validates a kernel string.
 
-        A kernel string is valid if it is in the format {username}/{kernel-slug}.
+        A kernel string is valid if it is in the format {username}/{kernel-slug}
+        or optionally {username}/{kernel-slug}/{version}.
 
         Args:
             kernel (Optional[str]): The kernel name to validate.
+            allow_version (bool): If True, allow {username}/{kernel-slug}/{version} format.
 
         Returns:
             None:
@@ -5359,6 +5389,32 @@ class KaggleApi:
 
             if len(split[1]) < 5:
                 raise ValueError("Kernel slug must be at least five characters")
+
+            if len(split) > 3 or (len(split) == 3 and not allow_version):
+                raise ValueError("Kernel must be specified in the form of " "'{username}/{kernel-slug}'")
+
+    def split_kernel_string(self, kernel: str) -> tuple:
+        """Splits a kernel string into owner_slug, kernel_slug, and optional version_number.
+
+        Args:
+            kernel: The kernel identifier (e.g., 'owner/slug' or 'owner/slug/5').
+
+        Returns:
+            A tuple containing (owner_slug, kernel_slug, version_number or None).
+        """
+        if "/" in kernel:
+            self.validate_kernel_string(kernel, allow_version=True)
+            parts = kernel.split("/")
+            if len(parts) == 3:
+                try:
+                    version = int(parts[2])
+                    return parts[0], parts[1], version
+                except ValueError:
+                    raise ValueError(f"Invalid version number: {parts[2]}. Version must be an integer.")
+            else:
+                return parts[0], parts[1], None
+        else:
+            return self.get_config_value(self.CONFIG_NAME_USER), kernel, None
 
     def validate_resources(
         self, folder: str, resources: List[Dict[str, Union[str, Dict[str, List[Dict[str, str]]]]]]

@@ -645,6 +645,9 @@ def parse_kernels(subparsers) -> None:
     parser_kernels_versions_optional.add_argument(
         "-k", "--kernel", dest="kernel_opt", required=False, help=argparse.SUPPRESS
     )
+    parser_kernels_versions_optional.add_argument(
+        "-v", "--csv", dest="csv_display", action="store_true", help=Help.param_csv
+    )
     parser_kernels_versions._action_groups.append(parser_kernels_versions_optional)
     parser_kernels_versions.set_defaults(func=api.kernels_versions_cli)
 

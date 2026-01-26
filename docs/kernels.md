@@ -161,13 +161,17 @@ kaggle kernels pull <KERNEL> [options]
 
 **Arguments:**
 
-*   `<KERNEL>`: Kernel URL suffix (format: `owner/kernel-slug`, e.g., `$KAGGLE_DEVELOPER/exercise-as-with`).
+*   `<KERNEL>`: Kernel URL suffix. Formats supported:
+    *   `owner/kernel-slug` - pulls the latest version
+    *   `owner/kernel-slug/version` - pulls a specific version (e.g., `$KAGGLE_DEVELOPER/my-notebook/5`)
 
 **Options:**
 
 *   `-p, --path <PATH>`: Folder to download files to (defaults to current directory).
 *   `-w, --wp`: Download files to the current working path.
 *   `-m, --metadata`: Generate a `kernel-metadata.json` file along with the kernel code.
+*   `-v, --version <VERSION>`: Pull a specific version by its version number (1, 2, 3, etc.).
+*   `--script-version-id <ID>`: Pull a specific version by its internal scriptVersionId.
 
 **Examples:**
 
@@ -183,9 +187,21 @@ kaggle kernels pull <KERNEL> [options]
     kaggle kernels pull --wp $KAGGLE_DEVELOPER/exercise-as-with
     ```
 
+3.  Pull a specific version (version 5) of a kernel:
+
+    ```bash
+    kaggle kernels pull $KAGGLE_DEVELOPER/my-notebook --version 5
+    ```
+
+4.  Pull version 3 using the slug syntax:
+
+    ```bash
+    kaggle kernels pull $KAGGLE_DEVELOPER/my-notebook/3
+    ```
+
 **Purpose:**
 
-This command allows you to download the source code and optionally the metadata of a kernel from Kaggle to your local machine.
+This command allows you to download the source code and optionally the metadata of a kernel from Kaggle to your local machine. You can download specific historical versions to reproduce results or compare changes.
 
 ## `kaggle kernels output`
 
@@ -275,3 +291,51 @@ kaggle kernels delete $KAGGLE_DEVELOPER/exercise-delete --yes
 **Purpose:**
 
 This command permanently removes one of your kernels from Kaggle. Use with caution.
+
+## `kaggle kernels versions`
+
+Lists all versions of a kernel with their version numbers, dates, and scores (for competition kernels).
+
+**Usage:**
+
+```bash
+kaggle kernels versions <KERNEL> [options]
+```
+
+**Arguments:**
+
+*   `<KERNEL>`: Kernel URL suffix (format: `owner/kernel-slug`, e.g., `$KAGGLE_DEVELOPER/my-competition-notebook`).
+
+**Options:**
+
+*   `-v, --csv`: Print results in CSV format.
+
+**Example:**
+
+1.  List all versions of a kernel:
+
+    ```bash
+    kaggle kernels versions $KAGGLE_DEVELOPER/my-competition-notebook
+    ```
+
+    Example output:
+    ```
+    Version    Date         PublicScore    PrivateScore   Status
+    ----------------------------------------------------------------------
+    12         2024-01-15   0.85234        -              complete
+    11         2024-01-14   0.84123        -              complete
+    10         2024-01-13   0.83456        -              complete
+    ```
+
+2.  List versions in CSV format for further processing:
+
+    ```bash
+    kaggle kernels versions $KAGGLE_DEVELOPER/my-notebook -v
+    ```
+
+**Purpose:**
+
+This command allows you to view all historical versions of a kernel, including their creation dates and competition scores (if applicable). Use this to:
+*   Find the version number needed to pull a specific version
+*   Track your score progression across competition submissions
+*   Audit changes made to a kernel over time
