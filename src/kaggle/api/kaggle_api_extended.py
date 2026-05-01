@@ -41,6 +41,8 @@ import bleach
 import requests
 import urllib3.exceptions as urllib3_exceptions
 from requests import RequestException
+from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
 
 from kaggle.models.kaggle_models_extended import ResumableUploadResult, File
 
@@ -3134,7 +3136,7 @@ class KaggleApi:
         else:
             print("Kernel push error: " + result.error)
 
-    def kernels_pull(self, kernel, path, metadata=False, quiet=True):
+    def kernels_pull(self, kernel, path, metadata=False, quiet=True, script_version_id=None, version_number=None):
         """Pulls a kernel to a specified path.
 
         This method pulls a kernel, including a metadata file (if metadata is True)
@@ -3145,7 +3147,12 @@ class KaggleApi:
             path: The path to which to pull the files.
             metadata: If True, also pull the metadata.
             quiet: Suppress verbose output (default is True).
+            script_version_id: If provided, pull this specific version by scriptVersionId.
+            version_number: If provided, pull this specific version by version number (1, 2, 3, etc.).
         """
+        if script_version_id and version_number:
+            raise ValueError("Cannot specify both --script-version-id and --version")
+
         existing_metadata = None
         if kernel is None:
             if path is None:
@@ -3161,19 +3168,33 @@ class KaggleApi:
                     else:
                         print("Using kernel " + kernel)
 
-        if "/" in kernel:
-            self.validate_kernel_string(kernel)
-            kernel_url_list = kernel.split("/")
-            owner_slug = kernel_url_list[0]
-            kernel_slug = kernel_url_list[1]
-        else:
-            owner_slug = self.get_config_value(self.CONFIG_NAME_USER)
-            kernel_slug = kernel
+        # Parse kernel string, extracting version if provided in slug format (owner/slug/version)
+        owner_slug, kernel_slug, slug_version = self.split_kernel_string(kernel)
+
+        # Version from slug overrides version_number if not explicitly set
+        if slug_version is not None and version_number is None:
+            version_number = slug_version
+
+        # Rebuild kernel string without version for API calls
+        kernel_ref = f"{owner_slug}/{kernel_slug}"
 
         if path is None:
             effective_path = self.get_default_download_dir("kernels", owner_slug, kernel_slug)
         else:
             effective_path = path
+
+        # If version_number is provided, map it to script_version_id
+        if version_number:
+            versions = self.kernels_versions(kernel_ref)
+            matching = [v for v in versions if v["version_number"] == version_number]
+            if not matching:
+                max_v = max(v["version_number"] for v in versions) if versions else 0
+                raise ValueError(f"Version {version_number} not found. Available versions: 1-{max_v}")
+            script_version_id = matching[0]["script_version_id"]
+
+        # If script_version_id is provided, use the version-specific pull method
+        if script_version_id:
+            return self._pull_kernel_by_version_id(owner_slug, kernel_slug, script_version_id, effective_path, quiet)
 
         if not os.path.exists(effective_path):
             os.makedirs(effective_path)
@@ -3267,14 +3288,270 @@ class KaggleApi:
         else:
             return script_path
 
-    def kernels_pull_cli(self, kernel, kernel_opt=None, path=None, metadata=False):
+    def kernels_pull_cli(
+        self, kernel, kernel_opt=None, path=None, metadata=False, script_version_id=None, version_number=None
+    ):
         """Client wrapper for kernels_pull."""
         kernel = kernel or kernel_opt
-        effective_path = self.kernels_pull(kernel, path=path, metadata=metadata, quiet=False)
-        if metadata:
+        effective_path = self.kernels_pull(
+            kernel,
+            path=path,
+            metadata=metadata,
+            script_version_id=script_version_id,
+            version_number=version_number,
+            quiet=False,
+        )
+        if script_version_id or version_number:
+            print("Versioned notebook downloaded to " + effective_path)
+        elif metadata:
             print("Source code and metadata downloaded to " + effective_path)
         else:
             print("Source code downloaded to " + effective_path)
+
+    def _fetch_rendered_notebook_html(self, owner: str, slug: str, script_version_id: int) -> str:
+        """Fetches rendered notebook HTML using Playwright.
+
+        Args:
+            owner: The kernel owner username.
+            slug: The kernel slug.
+            script_version_id: The scriptVersionId (run ID) of the version to fetch.
+
+        Returns:
+            str: The HTML content of the rendered notebook.
+
+        Raises:
+            ValueError: If notebook content iframe cannot be found.
+        """
+        url = f"https://www.kaggle.com/code/{owner}/{slug}/notebook?scriptVersionId={script_version_id}"
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(3000)
+
+            for frame in page.frames:
+                if "kaggleusercontent" in frame.url:
+                    content = frame.content()
+                    browser.close()
+                    return content
+
+            browser.close()
+            raise ValueError(
+                "Could not find notebook content iframe. "
+                "The kernel may not exist, be private, or the page structure may have changed."
+            )
+
+    def _parse_notebook_from_html(self, html: str) -> dict:
+        """Parses rendered notebook HTML into ipynb structure.
+
+        Args:
+            html: The HTML content from the rendered notebook.
+
+        Returns:
+            dict: A notebook dictionary in ipynb format.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        cells = []
+
+        for cell_div in soup.find_all("div", class_="cell"):
+            classes = cell_div.get("class", [])
+
+            if "code_cell" in classes:
+                input_area = cell_div.find("div", class_="input_area")
+                if input_area:
+                    pre = input_area.find("pre")
+                    if pre:
+                        cells.append(
+                            {
+                                "cell_type": "code",
+                                "source": pre.get_text().split("\n"),
+                                "metadata": {},
+                                "outputs": [],
+                                "execution_count": None,
+                            }
+                        )
+
+            elif "text_cell" in classes:
+                text_render = cell_div.find("div", class_="text_cell_render")
+                if text_render:
+                    cells.append(
+                        {
+                            "cell_type": "markdown",
+                            "source": text_render.get_text().strip().split("\n"),
+                            "metadata": {},
+                        }
+                    )
+
+        return {
+            "nbformat": 4,
+            "nbformat_minor": 4,
+            "metadata": {
+                "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+                "language_info": {"name": "python"},
+            },
+            "cells": cells,
+        }
+
+    def _pull_kernel_by_version_id(
+        self, owner: str, slug: str, script_version_id: int, path: str, quiet: bool = True
+    ) -> str:
+        """Pulls a specific kernel version by scriptVersionId.
+
+        Args:
+            owner: The kernel owner username.
+            slug: The kernel slug.
+            script_version_id: The scriptVersionId (run ID) of the version.
+            path: The directory to save the notebook to.
+            quiet: If True, suppress output messages.
+
+        Returns:
+            str: The path to the saved notebook file.
+
+        Raises:
+            ValueError: If no cells are found in the notebook.
+        """
+        html = self._fetch_rendered_notebook_html(owner, slug, script_version_id)
+        notebook = self._parse_notebook_from_html(html)
+
+        if not notebook["cells"]:
+            raise ValueError("No cells found in notebook - extraction failed")
+
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        notebook_path = os.path.join(path, f"{slug}.ipynb")
+        with open(notebook_path, "w", encoding="utf-8") as f:
+            json.dump(notebook, f, indent=2)
+
+        sidecar_path = os.path.join(path, f"{slug}.kaggle_version.json")
+        with open(sidecar_path, "w") as f:
+            json.dump(
+                {
+                    "owner": owner,
+                    "slug": slug,
+                    "scriptVersionId": script_version_id,
+                    "extraction": "playwright_html_parse",
+                },
+                f,
+                indent=2,
+            )
+
+        if not quiet:
+            print(f"Downloaded: {notebook_path}")
+            print(f"Cells: {len(notebook['cells'])}")
+            cell0 = notebook["cells"][0]
+            src = "".join(cell0["source"])[:60]
+            print(f"Cell[0] ({cell0['cell_type']}): {src}...")
+
+        return notebook_path
+
+    def _fetch_kernel_versions(self, owner: str, slug: str) -> list:
+        """Fetches version list by intercepting ListKernelVersions API.
+
+        Args:
+            owner: The kernel owner username.
+            slug: The kernel slug.
+
+        Returns:
+            list: List of version dictionaries with version_number, script_version_id, etc.
+
+        Raises:
+            ValueError: If version list cannot be fetched.
+        """
+        url = f"https://www.kaggle.com/code/{owner}/{slug}/log"
+        versions_data = []
+
+        def capture_versions(response):
+            if "ListKernelVersions" in response.url:
+                try:
+                    data = response.json()
+                    versions_data.append(data)
+                except Exception:
+                    pass
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.on("response", capture_versions)
+            page.goto(url, wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(3000)
+            browser.close()
+
+        if not versions_data:
+            raise ValueError("Could not fetch version list. The kernel may not exist or be private.")
+
+        result = []
+        for item in versions_data[0].get("items", []):
+            ver = item.get("version", {})
+            run = item.get("run", {})
+            submission = item.get("submission", {})
+            # Try to extract scores from submission or run objects
+            public_score = submission.get("publicScore") or run.get("publicScore")
+            private_score = submission.get("privateScore") or run.get("privateScore")
+            result.append(
+                {
+                    "version_number": ver.get("versionNumber"),
+                    "script_version_id": run.get("id"),
+                    "rendered_url": run.get("renderedOutputUrl"),
+                    "status": run.get("status"),
+                    "date_created": run.get("dateCreated"),
+                    "public_score": public_score,
+                    "private_score": private_score,
+                }
+            )
+
+        return result
+
+    def kernels_versions(self, kernel: str) -> list:
+        """Lists all versions of a kernel.
+
+        Args:
+            kernel: The kernel identifier in format owner/slug.
+
+        Returns:
+            list: List of version dictionaries.
+        """
+        self.validate_kernel_string(kernel)
+        owner_slug, kernel_slug = kernel.split("/")
+        return self._fetch_kernel_versions(owner_slug, kernel_slug)
+
+    def kernels_versions_cli(self, kernel, kernel_opt=None, csv_display=False):
+        """CLI wrapper for kernels_versions.
+
+        Args:
+            kernel: The kernel identifier.
+            kernel_opt: Alternative kernel identifier from -k flag.
+            csv_display: If True, print comma-separated values instead of a table.
+        """
+        kernel = kernel or kernel_opt
+        versions = self.kernels_versions(kernel)
+
+        if csv_display:
+            fields = ["version_number", "script_version_id", "date_created", "public_score", "private_score", "status"]
+            self.print_csv(versions, fields)
+        else:
+            # Determine which columns to show (hide score columns if no scores available)
+            has_scores = any(v.get("public_score") or v.get("private_score") for v in versions)
+            if has_scores:
+                print(f"{'Version':<10} {'Date':<12} {'PublicScore':<14} {'PrivateScore':<14} {'Status':<12}")
+                print("-" * 70)
+                for v in versions:
+                    version_num = v.get("version_number", "N/A")
+                    date = v.get("date_created", "N/A")[:10] if v.get("date_created") else "N/A"
+                    public_score = v.get("public_score") or "-"
+                    private_score = v.get("private_score") or "-"
+                    status = v.get("status", "N/A")
+                    print(f"{version_num:<10} {date:<12} {public_score:<14} {private_score:<14} {status:<12}")
+            else:
+                print(f"{'Version':<10} {'scriptVersionId':<18} {'Date':<12} {'Status':<12}")
+                print("-" * 55)
+                for v in versions:
+                    version_num = v.get("version_number", "N/A")
+                    script_id = v.get("script_version_id", "N/A")
+                    date = v.get("date_created", "N/A")[:10] if v.get("date_created") else "N/A"
+                    status = v.get("status", "N/A")
+                    print(f"{version_num:<10} {script_id:<18} {date:<12} {status:<12}")
 
     def kernels_output(self, kernel: str, path: str, force: bool = False, quiet: bool = True) -> Tuple[List[str], str]:
         """Retrieves the output for a specified kernel.
@@ -5089,13 +5366,15 @@ class KaggleApi:
             except:
                 raise ValueError("Model instance version's version-number must be an integer")
 
-    def validate_kernel_string(self, kernel: Optional[str]) -> None:
+    def validate_kernel_string(self, kernel: Optional[str], allow_version: bool = False) -> None:
         """Validates a kernel string.
 
-        A kernel string is valid if it is in the format {username}/{kernel-slug}.
+        A kernel string is valid if it is in the format {username}/{kernel-slug}
+        or optionally {username}/{kernel-slug}/{version}.
 
         Args:
             kernel (Optional[str]): The kernel name to validate.
+            allow_version (bool): If True, allow {username}/{kernel-slug}/{version} format.
 
         Returns:
             None:
@@ -5110,6 +5389,32 @@ class KaggleApi:
 
             if len(split[1]) < 5:
                 raise ValueError("Kernel slug must be at least five characters")
+
+            if len(split) > 3 or (len(split) == 3 and not allow_version):
+                raise ValueError("Kernel must be specified in the form of " "'{username}/{kernel-slug}'")
+
+    def split_kernel_string(self, kernel: str) -> tuple:
+        """Splits a kernel string into owner_slug, kernel_slug, and optional version_number.
+
+        Args:
+            kernel: The kernel identifier (e.g., 'owner/slug' or 'owner/slug/5').
+
+        Returns:
+            A tuple containing (owner_slug, kernel_slug, version_number or None).
+        """
+        if "/" in kernel:
+            self.validate_kernel_string(kernel, allow_version=True)
+            parts = kernel.split("/")
+            if len(parts) == 3:
+                try:
+                    version = int(parts[2])
+                    return parts[0], parts[1], version
+                except ValueError:
+                    raise ValueError(f"Invalid version number: {parts[2]}. Version must be an integer.")
+            else:
+                return parts[0], parts[1], None
+        else:
+            return self.get_config_value(self.CONFIG_NAME_USER), kernel, None
 
     def validate_resources(
         self, folder: str, resources: List[Dict[str, Union[str, Dict[str, List[Dict[str, str]]]]]]

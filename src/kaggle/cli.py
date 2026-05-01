@@ -570,6 +570,21 @@ def parse_kernels(subparsers) -> None:
     parser_kernels_pull_optional.add_argument(
         "-m", "--metadata", dest="metadata", action="store_true", help=Help.param_kernel_pull_metadata
     )
+    parser_kernels_pull_optional.add_argument(
+        "--script-version-id",
+        dest="script_version_id",
+        type=int,
+        required=False,
+        help=Help.param_kernel_script_version_id,
+    )
+    parser_kernels_pull_optional.add_argument(
+        "-v",
+        "--version",
+        dest="version_number",
+        type=int,
+        required=False,
+        help=Help.param_kernel_version_number,
+    )
     parser_kernels_pull._action_groups.append(parser_kernels_pull_optional)
     parser_kernels_pull.set_defaults(func=api.kernels_pull_cli)
 
@@ -618,6 +633,23 @@ def parse_kernels(subparsers) -> None:
     )
     parser_kernels_delete._action_groups.append(parser_kernels_delete_optional)
     parser_kernels_delete.set_defaults(func=api.kernels_delete_cli)
+
+    # Kernels versions
+    parser_kernels_versions = subparsers_kernels.add_parser(
+        "versions",
+        formatter_class=argparse.RawTextHelpFormatter,
+        help=Help.command_kernels_versions,
+    )
+    parser_kernels_versions_optional = parser_kernels_versions._action_groups.pop()
+    parser_kernels_versions_optional.add_argument("kernel", nargs="?", default=None, help=Help.param_kernel)
+    parser_kernels_versions_optional.add_argument(
+        "-k", "--kernel", dest="kernel_opt", required=False, help=argparse.SUPPRESS
+    )
+    parser_kernels_versions_optional.add_argument(
+        "-v", "--csv", dest="csv_display", action="store_true", help=Help.param_csv
+    )
+    parser_kernels_versions._action_groups.append(parser_kernels_versions_optional)
+    parser_kernels_versions.set_defaults(func=api.kernels_versions_cli)
 
 
 def parse_models(subparsers) -> None:
@@ -1066,7 +1098,7 @@ class Help(object):
     ]
     competitions_choices = ["list", "files", "download", "submit", "submissions", "leaderboard"]
     datasets_choices = ["list", "files", "download", "create", "version", "init", "metadata", "status", "delete"]
-    kernels_choices = ["list", "files", "get", "init", "push", "pull", "output", "status", "update", "delete"]
+    kernels_choices = ["list", "files", "get", "init", "push", "pull", "output", "status", "update", "delete", "versions"]
     models_choices = ["instances", "i", "variations", "v", "get", "list", "init", "create", "delete", "update"]
     model_instances_choices = ["versions", "v", "get", "files", "list", "init", "create", "delete", "update"]
     model_instance_versions_choices = ["init", "create", "download", "delete", "files", "list"]
@@ -1132,6 +1164,9 @@ class Help(object):
     command_kernels_output = "Get data output from the latest kernel run"
     command_kernels_status = "Display the status of the latest kernel run"
     command_kernels_delete = "Delete a kernel"
+    command_kernels_versions = "List all versions of a kernel with their scriptVersionIds"
+    param_kernel_script_version_id = "Pull a specific version by its scriptVersionId (run ID)"
+    param_kernel_version_number = "Pull a specific version by its version number (1, 2, 3, etc.)"
 
     # Models commands
     command_models_files = "List model files"
